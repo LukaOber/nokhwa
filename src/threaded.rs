@@ -23,7 +23,6 @@ use nokhwa_core::{
         FrameFormat, KnownCameraControl, RequestedFormat, RequestedFormatType, Resolution,
     },
 };
-use std::thread::JoinHandle;
 use std::{
     collections::HashMap,
     sync::{
@@ -31,6 +30,7 @@ use std::{
         Arc, Mutex,
     },
 };
+use std::{thread::JoinHandle, time::SystemTime};
 
 type AtomicLock<T> = Arc<Mutex<T>>;
 pub type CallbackFn = fn(
@@ -517,14 +517,15 @@ impl CallbackCamera {
 
     /// Checks if stream if open. If it is, it will return true.
     pub fn is_stream_open(&self) -> Result<bool, NokhwaError> {
-        Ok(self
+        let res = Ok(self
             .camera
             .lock()
             .map_err(|why| NokhwaError::GetPropertyError {
                 property: "is stream open".to_string(),
                 error: why.to_string(),
             })?
-            .is_stream_open())
+            .is_stream_open());
+        res
     }
 
     /// Will drop the stream.
@@ -552,18 +553,23 @@ fn camera_frame_thread_loop(
     die_bool: Arc<AtomicBool>,
 ) {
     loop {
-        if let Ok(mut camera) = camera.lock() {
-            if let Ok(frame) = camera.frame() {
-                if let Ok(mut last_frame) = last_frame_captured.lock() {
-                    *last_frame = frame.clone();
-                    if let Ok(mut cb) = frame_callback.lock() {
-                        cb(frame);
+        {
+            let start = SystemTime::now();
+            if let Ok(mut camera) = camera.try_lock() {
+                if let Ok(frame) = camera.frame() {
+                    drop(camera);
+                    if let Ok(mut last_frame) = last_frame_captured.try_lock() {
+                        *last_frame = frame.clone();
+                        if let Ok(mut cb) = frame_callback.try_lock() {
+                            cb(frame);
+                        }
                     }
                 }
             }
+            if die_bool.load(Ordering::SeqCst) {
+                break;
+            }
         }
-        if die_bool.load(Ordering::SeqCst) {
-            break;
-        }
+        std::thread::sleep(std::time::Duration::from_millis(33));
     }
 }
